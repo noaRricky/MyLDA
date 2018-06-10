@@ -19,7 +19,7 @@ class MLDA:
         :param n_topic: 主题数目
         :param n_iter: 迭代次数
         :param alpha: 文档主题分布超参数
-        :param eta: 主题单词分布超参数
+        :param beta: 主题单词分布超参数
         :param random_state: 随机种子
         :param refresh: 循环多少次输出当前日志
         """
@@ -30,8 +30,11 @@ class MLDA:
         # if random_state is None, check_random_state(None) does nothing
         self.random_state = random_state
         self.refresh = refresh
+        self.topic_word_ = None
+        self.doc_topic_ = None
+        self.nzt_ = None
 
-        if alpha <= 0 or eta <= 0:
+        if alpha <= 0 or beta <= 0:
             raise ValueError('alpha and eta must be greater than zero')
 
         # random number that are reused
@@ -50,30 +53,27 @@ class MLDA:
         rands = self._rands.copy()
 
         self._initialize(corpus)  # 初始化所有有关信息
-        for iter in range(self.n_iter):
+
+        for n_iter in range(self.n_iter):
 
             random_state.shuffle(rands)
-            if iter % self.refresh == 0:
-                ll = self.loglikelihood()
-                logger.info('<{}> log likelihood: {:.0f}'.format(iter, ll))
+            if n_iter % self.refresh == 0:
+                pp = self.perplexity(corpus)
+                logger.info('<{}> log likelihood: {:.0f}'.format(n_iter, pp))
 
             self._sample_topics(rands)
-        ll = self.loglikelihood()
-        logger.info('<{}> log likelihood: {:.0f}'.format(iter, ll))
+        pp = self.perplexity(corpus)
+        logger.info('<{}> log likelihood: {:.0f}'.format(self.n_iter, pp))
 
         # 计算文档主题分布和主题单词分布
-        self.doc_topic_ = (self.ndz_ + self.alpha).astype(float)
-        self.doc_topic_ /= np.sum(self.doc_topic_, axis=1)[:, np.newaxis]
-        self.topic_word_ = (self.nzw_ + self.beta).astype(float)
-        self.topic_word_ /= np.sum(self.topic_word_, axis=1)[:,np.newaxis]
+        self._count_distribution()
 
         # 删除计算过程中的中间值，以节约空间
         del self.TS
         del self.DS
         del self.ZS
+        del self.ndz_
         return self
-
-
 
     def _initialize(self, X: np.array):
         n_doc, n_term = X.shape
@@ -90,7 +90,8 @@ class MLDA:
         self.nzt_ = nzt_ = np.zeros(
             (n_topics, n_term), dtype=np.int)  # 主题单词统计量
         self.ndz_ = ndz_ = np.zeros((n_doc, n_topics), dtype=np.int)  # 文档主题统计量
-        self.nz_ = nz_ = np.zeros(n_topics, dtype=np.int)
+        self.nz_ = nz_ = np.zeros(n_topics, dtype=np.int)  # 统计主题出现总数
+        self.n_word = n_word  # 统计单词总数
 
         # TS, DS. ZS 分别表示单词(Term)标号集合，文档标号集合，赋予主题标号集合
         self.TS, self.DS = TS, DS = utils.matrix_to_lists(X)
@@ -98,22 +99,36 @@ class MLDA:
 
         for i in range(n_word):
             t, d, z = TS[i], DS[i], ZS[i]
-            nzw_[z, t] += 1
+            nzt_[z, t] += 1
             ndz_[d, z] += 1
             nz_[z] += 1
 
-    def loglikelihood(self):
+    def perplexity(self, X: np.array):
         """
-        Calculate complete log likelihood, log p(w,z)
-        Formula used is log p(w,z) = log p(w|z) + log p(z)
-        :return: log likelihood
+        calculate perplexity the formulate use
+        p(W|M)
         """
-        print('hello world')
+        self._count_distribution()  # 首先计算当前循环对应的两分布
+
+        perplexity = np.dot(self.doc_topic_, self.topic_word_)
+        perplexity = np.log(perplexity)
+        perplexity = np.sum(perplexity * X) / self.n_word
+        return perplexity
+
+    def _count_distribution(self):
+        """
+        计算当前循环文档主题分布、主题单词分布
+        :return: 运算结果存储在类中
+        """
+        self.doc_topic_ = (self.ndz_ + self.alpha).astype(float)
+        self.doc_topic_ /= np.sum(self.doc_topic_, axis=1)[:, np.newaxis]
+        self.topic_word_ = (self.nzw_ + self.beta).astype(float)
+        self.topic_word_ /= np.sum(self.topic_word_, axis=1)[:, np.newaxis]
 
     def _sample_topics(self, rands):
         """
         sample topics base on store information
-        :param rands 存储的随机数 
+            :param rands 存储的随机数 
         """
         n_topics, n_term = self.nzt_.shape
 
@@ -133,10 +148,10 @@ class MLDA:
             nzt_[z, t] -= 1
             nz_[z] -= 1
             ndz_[d, z] -= 1
-            
+
             # 计算采样的分布
-            p = (nzt_[:,t] + beta) / (nz_ + n_term * beta) * (ndz_[d] + alpha)
-            p_sum = np.array([p[0: col+1] for col in range(p.size)])
+            p = (nzt_[:, t] + beta) / (nz_ + n_term * beta) * (ndz_[d] + alpha)
+            p_sum = np.array([p[0: col + 1] for col in range(p.size)])
             r = rands(i % n_rand) * p_sum[-1]
             new_z = np.searchsorted(p_sum, r)
 
@@ -144,7 +159,7 @@ class MLDA:
             nzt_[new_z, t] += 1
             nz_[new_z] += 1
             ndz_[d, new_z] += 1
-            
+
 
 if __name__ == '__main__':
     model = MLDA(n_topic=20, random_state=10)
